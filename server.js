@@ -14,9 +14,9 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir);
 }
 
-// === CORS SETUP ===
+// === CORS: Allow ONLY Netlify ===
 app.use(cors({
-  origin: process.env.CLIENT_URL || 'http://localhost:5173',
+  origin: 'https://golden-frangollo-580ffa.netlify.app',
   methods: ['GET', 'POST'],
 }));
 
