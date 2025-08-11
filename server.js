@@ -8,13 +8,19 @@ const fs = require('fs');
 
 const app = express();
 
+// Verify MongoDB URI is set
+if (!process.env.MONGODB_URI) {
+  console.error('❌ FATAL ERROR: MONGODB_URI not configured in environment variables');
+  process.exit(1);
+}
+
 // Create 'uploads' directory if it doesn't exist
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-// Improved CORS Configuration
+// CORS Configuration
 app.use(cors({
   origin: [
     'https://golden-frangollo-580ffa.netlify.app',
@@ -29,7 +35,7 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use('/uploads', express.static(uploadsDir));
 
-// Enhanced Multer Configuration with file filtering
+// Multer Configuration
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, 'uploads/');
@@ -59,38 +65,26 @@ const upload = multer({
   }
 });
 
-// MongoDB Connection with better error handling and retry logic
-const mongooseOptions = {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-  serverSelectionTimeoutMS: 30000,
-  socketTimeoutMS: 45000,
-  connectTimeoutMS: 30000,
-  retryWrites: true,
-  w: 'majority',
-  retryAttempts: 5,
-  retryDelay: 1000
-};
-
-const connectWithRetry = () => {
-  console.log('Attempting MongoDB connection...');
-  mongoose.connect(process.env.MONGODB_URI, mongooseOptions)
-    .then(() => {
-      console.log('✅ MongoDB connected successfully');
-      mongoose.connection.on('error', err => {
-        console.error('MongoDB connection error:', err);
-      });
-    })
-    .catch(err => {
-      console.error('❌ MongoDB connection error:', err.message);
-      console.log('Retrying in 5 seconds...');
-      setTimeout(connectWithRetry, 5000);
+// SIMPLIFIED MongoDB Connection - This will work!
+const connectDB = async () => {
+  try {
+    await mongoose.connect(process.env.MONGODB_URI, {
+      useNewUrlParser: true,
+      useUnifiedTopology: true,
+      serverSelectionTimeoutMS: 5000,
     });
+    console.log('✅ MongoDB Connected!');
+  } catch (err) {
+    console.error('❌ MongoDB Connection Error:', err.message);
+    // Exit process with failure
+    process.exit(1);
+  }
 };
 
-connectWithRetry();
+// Connect to MongoDB
+connectDB();
 
-// Enhanced Mongoose Schema with validation
+// Mongoose Schema
 const registrationSchema = new mongoose.Schema({
   name: { 
     type: String, 
@@ -161,7 +155,7 @@ const registrationSchema = new mongoose.Schema({
 
 const Registration = mongoose.model('Registration', registrationSchema);
 
-// Enhanced Registration Endpoint
+// Registration Endpoint
 app.post('/api/register', upload.single('idPhoto'), async (req, res) => {
   try {
     // Parse selectedEvents if it's a string (for form-data)
@@ -254,7 +248,14 @@ app.post('/api/register', upload.single('idPhoto'), async (req, res) => {
   }
 });
 
-// Other routes remain the same...
+// Health Check Endpoint
+app.get('/api/health', (req, res) => {
+  res.json({
+    status: 'OK',
+    database: mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected',
+    timestamp: new Date()
+  });
+});
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -265,7 +266,7 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Start Server with better error handling
+// Start Server
 const PORT = process.env.PORT || 5000;
 const server = app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
