@@ -11,21 +11,22 @@ const app = express();
 // Create 'uploads' directory if it doesn't exist
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir);
+  fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-// === CORS: Allow ONLY Netlify ===
+// CORS Configuration
 app.use(cors({
-  origin: 'https://golden-frangollo-580ffa.netlify.app',
-  methods: ['GET', 'POST'],
+  origin: ['https://golden-frangollo-580ffa.netlify.app/', 'http://localhost:5173'],
+  methods: ['GET', 'POST', 'PUT'],
+  credentials: true
 }));
 
-// === Middlewares ===
+// Middlewares
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use('/uploads', express.static(uploadsDir));
 
-// === Multer Setup ===
+// Multer Configuration
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, 'uploads/');
@@ -40,23 +41,37 @@ const storage = multer.diskStorage({
 
 const upload = multer({ storage });
 
-// === MongoDB Connection ===
+// MongoDB Connection with improved configuration
 const connectWithRetry = () => {
   console.log('Attempting MongoDB connection...');
   mongoose.connect(process.env.MONGODB_URI, {
-    serverSelectionTimeoutMS: 5000
+    useNewUrlParser: true,
+    useUnifiedTopology: true,
+    serverSelectionTimeoutMS: 10000,  // Increased timeout
+    socketTimeoutMS: 45000,          // Added socket timeout
+    connectTimeoutMS: 10000,         // Added connection timeout
+    retryWrites: true,
+    w: 'majority'
   })
-    .then(() => console.log('✅ MongoDB connected successfully'))
-    .catch(err => {
-      console.error('❌ MongoDB connection error:', err.message);
-      console.log('Retrying in 5 seconds...');
-      setTimeout(connectWithRetry, 5000);
+  .then(() => {
+    console.log('✅ MongoDB connected successfully');
+    // Verify connection is ready
+    const db = mongoose.connection;
+    db.on('error', console.error.bind(console, 'MongoDB connection error:'));
+    db.once('open', () => {
+      console.log('MongoDB connection is ready');
     });
+  })
+  .catch(err => {
+    console.error('❌ MongoDB connection error:', err);
+    console.log('Retrying in 5 seconds...');
+    setTimeout(connectWithRetry, 5000);
+  });
 };
 
 connectWithRetry();
 
-// === Mongoose Schema ===
+// Mongoose Schemas
 const registrationSchema = new mongoose.Schema({
   name: { type: String, required: true },
   email: { type: String, required: true, unique: true },
@@ -66,13 +81,15 @@ const registrationSchema = new mongoose.Schema({
   sem: { type: String, required: true },
   selectedEvents: { type: [String], required: true },
   idPhotoPath: { type: String },
+  isPresent: { type: Boolean, default: false },
   registrationDate: { type: Date, default: Date.now }
 });
 
 const Registration = mongoose.model('Registration', registrationSchema);
 
-// === Routes ===
+// Routes
 
+// Registration Endpoint
 app.post('/api/register', upload.single('idPhoto'), async (req, res) => {
   try {
     const {
@@ -122,6 +139,53 @@ app.post('/api/register', upload.single('idPhoto'), async (req, res) => {
   }
 });
 
+// Get All Registrations (Admin)
+app.get('/api/admin/registrations', async (req, res) => {
+  try {
+    const registrations = await Registration.find().sort({ registrationDate: -1 });
+    res.json(registrations);
+  } catch (error) {
+    console.error('Error fetching registrations:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Update Attendance Status
+app.put('/api/admin/attendance/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { isPresent } = req.body;
+
+    const updatedReg = await Registration.findByIdAndUpdate(
+      id,
+      { isPresent },
+      { new: true }
+    );
+
+    if (!updatedReg) {
+      return res.status(404).json({ error: 'Registration not found' });
+    }
+
+    res.json(updatedReg);
+  } catch (error) {
+    console.error('Error updating attendance:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get Events List
+app.get('/api/admin/events', async (req, res) => {
+  try {
+    const registrations = await Registration.find();
+    const events = [...new Set(registrations.flatMap(reg => reg.selectedEvents))];
+    res.json(events);
+  } catch (error) {
+    console.error('Error fetching events:', error);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Health Check Endpoint
 app.get('/api/health', (req, res) => {
   res.json({
     status: 'OK',
@@ -130,7 +194,7 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-// === Start Server ===
+// Start Server
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
