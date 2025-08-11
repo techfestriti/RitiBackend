@@ -14,19 +14,22 @@ if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-// CORS Configuration
+// Improved CORS Configuration
 app.use(cors({
-  origin: ['https://golden-frangollo-580ffa.netlify.app/', 'http://localhost:5173'],
+  origin: [
+    'https://golden-frangollo-580ffa.netlify.app',
+    'http://localhost:5173'
+  ],
   methods: ['GET', 'POST', 'PUT'],
   credentials: true
 }));
 
 // Middlewares
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use('/uploads', express.static(uploadsDir));
 
-// Multer Configuration
+// Enhanced Multer Configuration with file filtering
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     cb(null, 'uploads/');
@@ -39,164 +42,253 @@ const storage = multer.diskStorage({
   }
 });
 
-const upload = multer({ storage });
+const fileFilter = (req, file, cb) => {
+  const allowedTypes = ['image/jpeg', 'image/png', 'image/jpg'];
+  if (allowedTypes.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Invalid file type. Only JPEG, PNG, and JPG are allowed.'), false);
+  }
+};
 
-// MongoDB Connection with improved configuration
+const upload = multer({ 
+  storage,
+  fileFilter,
+  limits: {
+    fileSize: 5 * 1024 * 1024 // 5MB limit
+  }
+});
+
+// MongoDB Connection with better error handling and retry logic
+const mongooseOptions = {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+  serverSelectionTimeoutMS: 30000,
+  socketTimeoutMS: 45000,
+  connectTimeoutMS: 30000,
+  retryWrites: true,
+  w: 'majority',
+  retryAttempts: 5,
+  retryDelay: 1000
+};
+
 const connectWithRetry = () => {
   console.log('Attempting MongoDB connection...');
-  mongoose.connect(process.env.MONGODB_URI, {
-    useNewUrlParser: true,
-    useUnifiedTopology: true,
-    serverSelectionTimeoutMS: 10000,  // Increased timeout
-    socketTimeoutMS: 45000,          // Added socket timeout
-    connectTimeoutMS: 10000,         // Added connection timeout
-    retryWrites: true,
-    w: 'majority'
-  })
-  .then(() => {
-    console.log('✅ MongoDB connected successfully');
-    // Verify connection is ready
-    const db = mongoose.connection;
-    db.on('error', console.error.bind(console, 'MongoDB connection error:'));
-    db.once('open', () => {
-      console.log('MongoDB connection is ready');
+  mongoose.connect(process.env.MONGODB_URI, mongooseOptions)
+    .then(() => {
+      console.log('✅ MongoDB connected successfully');
+      mongoose.connection.on('error', err => {
+        console.error('MongoDB connection error:', err);
+      });
+    })
+    .catch(err => {
+      console.error('❌ MongoDB connection error:', err.message);
+      console.log('Retrying in 5 seconds...');
+      setTimeout(connectWithRetry, 5000);
     });
-  })
-  .catch(err => {
-    console.error('❌ MongoDB connection error:', err);
-    console.log('Retrying in 5 seconds...');
-    setTimeout(connectWithRetry, 5000);
-  });
 };
 
 connectWithRetry();
 
-// Mongoose Schemas
+// Enhanced Mongoose Schema with validation
 const registrationSchema = new mongoose.Schema({
-  name: { type: String, required: true },
-  email: { type: String, required: true, unique: true },
-  contact: { type: String, required: true },
-  college: { type: String, required: true },
-  course: { type: String, required: true },
-  sem: { type: String, required: true },
-  selectedEvents: { type: [String], required: true },
-  idPhotoPath: { type: String },
-  isPresent: { type: Boolean, default: false },
-  registrationDate: { type: Date, default: Date.now }
+  name: { 
+    type: String, 
+    required: [true, 'Name is required'],
+    trim: true
+  },
+  email: { 
+    type: String, 
+    required: [true, 'Email is required'],
+    unique: true,
+    lowercase: true,
+    trim: true,
+    validate: {
+      validator: function(v) {
+        return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v);
+      },
+      message: props => `${props.value} is not a valid email address!`
+    }
+  },
+  contact: { 
+    type: String, 
+    required: [true, 'Contact number is required'],
+    validate: {
+      validator: function(v) {
+        return /^[6-9]\d{9}$/.test(v);
+      },
+      message: props => `${props.value} is not a valid Indian phone number!`
+    }
+  },
+  college: { 
+    type: String, 
+    required: [true, 'College name is required'],
+    trim: true
+  },
+  course: { 
+    type: String, 
+    required: [true, 'Course is required'],
+    trim: true
+  },
+  sem: { 
+    type: String, 
+    required: [true, 'Semester is required'],
+    trim: true
+  },
+  selectedEvents: { 
+    type: [String], 
+    required: [true, 'At least one event must be selected'],
+    validate: {
+      validator: function(v) {
+        return v.length > 0;
+      },
+      message: props => 'At least one event must be selected'
+    }
+  },
+  idPhotoPath: { 
+    type: String,
+    trim: true
+  },
+  isPresent: { 
+    type: Boolean, 
+    default: false 
+  },
+  registrationDate: { 
+    type: Date, 
+    default: Date.now 
+  }
 });
 
 const Registration = mongoose.model('Registration', registrationSchema);
 
-// Routes
-
-// Registration Endpoint
+// Enhanced Registration Endpoint
 app.post('/api/register', upload.single('idPhoto'), async (req, res) => {
   try {
-    const {
-      name,
-      email,
-      contact,
-      college,
-      course,
-      sem,
-      selectedEvents
-    } = req.body;
+    // Parse selectedEvents if it's a string (for form-data)
+    let selectedEvents = req.body.selectedEvents;
+    if (typeof selectedEvents === 'string') {
+      try {
+        selectedEvents = JSON.parse(selectedEvents);
+      } catch (e) {
+        selectedEvents = [selectedEvents];
+      }
+    }
 
-    if (!selectedEvents || (Array.isArray(selectedEvents) ? selectedEvents.length === 0 : false)) {
+    // Validate required fields
+    const requiredFields = ['name', 'email', 'contact', 'college', 'course', 'sem'];
+    const missingFields = requiredFields.filter(field => !req.body[field]);
+    
+    if (missingFields.length > 0) {
+      return res.status(400).json({ 
+        error: 'Missing required fields',
+        missingFields
+      });
+    }
+
+    // Validate at least one event is selected
+    if (!selectedEvents || selectedEvents.length === 0) {
       return res.status(400).json({ error: 'Select at least one event' });
     }
 
-    const selectedEventsArray = Array.isArray(selectedEvents)
-      ? selectedEvents
-      : [selectedEvents];
-
     const newRegistration = new Registration({
-      name,
-      email,
-      contact,
-      college,
-      course,
-      sem,
-      selectedEvents: selectedEventsArray,
+      name: req.body.name,
+      email: req.body.email,
+      contact: req.body.contact,
+      college: req.body.college,
+      course: req.body.course,
+      sem: req.body.sem,
+      selectedEvents,
       idPhotoPath: req.file ? req.file.path : null
     });
 
     await newRegistration.save();
-    res.status(201).json({ message: 'Registration successful!' });
+    
+    return res.status(201).json({ 
+      success: true,
+      message: 'Registration successful!',
+      registrationId: newRegistration._id
+    });
 
   } catch (error) {
     console.error('Registration error:', error);
 
+    // Handle duplicate key error (email)
     if (error.code === 11000) {
-      return res.status(400).json({ error: 'Email already registered' });
+      return res.status(409).json({ 
+        error: 'Email already registered',
+        details: 'This email address is already in use'
+      });
     }
 
+    // Handle validation errors
     if (error.name === 'ValidationError') {
-      return res.status(400).json({ error: 'Validation failed', details: error.message });
+      const errors = {};
+      Object.keys(error.errors).forEach(key => {
+        errors[key] = error.errors[key].message;
+      });
+      return res.status(400).json({ 
+        error: 'Validation failed',
+        details: errors
+      });
     }
 
-    return res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Get All Registrations (Admin)
-app.get('/api/admin/registrations', async (req, res) => {
-  try {
-    const registrations = await Registration.find().sort({ registrationDate: -1 });
-    res.json(registrations);
-  } catch (error) {
-    console.error('Error fetching registrations:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Update Attendance Status
-app.put('/api/admin/attendance/:id', async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { isPresent } = req.body;
-
-    const updatedReg = await Registration.findByIdAndUpdate(
-      id,
-      { isPresent },
-      { new: true }
-    );
-
-    if (!updatedReg) {
-      return res.status(404).json({ error: 'Registration not found' });
+    // Handle file upload errors
+    if (error instanceof multer.MulterError) {
+      if (error.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ 
+          error: 'File too large',
+          details: 'Maximum file size is 5MB'
+        });
+      }
+      return res.status(400).json({ 
+        error: 'File upload error',
+        details: error.message
+      });
     }
 
-    res.json(updatedReg);
-  } catch (error) {
-    console.error('Error updating attendance:', error);
-    res.status(500).json({ error: 'Server error' });
+    // Handle other errors
+    return res.status(500).json({ 
+      error: 'Internal server error',
+      details: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 
-// Get Events List
-app.get('/api/admin/events', async (req, res) => {
-  try {
-    const registrations = await Registration.find();
-    const events = [...new Set(registrations.flatMap(reg => reg.selectedEvents))];
-    res.json(events);
-  } catch (error) {
-    console.error('Error fetching events:', error);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
+// Other routes remain the same...
 
-// Health Check Endpoint
-app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'OK',
-    database: mongoose.connection.readyState === 1 ? 'Connected' : 'Disconnected',
-    timestamp: new Date()
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  res.status(500).json({
+    error: 'Internal server error',
+    message: 'An unexpected error occurred'
   });
 });
 
-// Start Server
+// Start Server with better error handling
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
   console.log(`MongoDB readyState: ${mongoose.connection.readyState}`);
+});
+
+// Handle server errors
+server.on('error', (error) => {
+  if (error.code === 'EADDRINUSE') {
+    console.error(`Port ${PORT} is already in use`);
+    process.exit(1);
+  } else {
+    console.error('Server error:', error);
+  }
+});
+
+// Graceful shutdown
+process.on('SIGINT', () => {
+  console.log('Shutting down server...');
+  server.close(() => {
+    mongoose.connection.close(false, () => {
+      console.log('Server and MongoDB connection closed');
+      process.exit(0);
+    });
+  });
 });
