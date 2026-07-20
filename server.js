@@ -166,15 +166,25 @@ app.get('/api/admin/registrations', checkAdminAuth, async (req, res) => {
   }
 });
 
+// REPLACE THIS IN YOUR SERVER.JS
 app.put('/api/admin/attendance/:id', checkAdminAuth, async (req, res) => {
   try {
+    // This supports both a JSON body { isPresent: true } AND a fallback true assessment
+    const isPresent = req.body.isPresent !== undefined ? req.body.isPresent : true;
+
     const updated = await Registration.findByIdAndUpdate(
       req.params.id,
-      { isPresent: req.body.isPresent },
+      { isPresent: isPresent },
       { new: true }
     );
+    
+    if (!updated) {
+      return res.status(404).json({ error: 'Participant not found' });
+    }
+    
     res.json(updated);
   } catch (error) {
+    console.error('Attendance Update Error:', error);
     res.status(500).json({ error: 'Attendance update failed' });
   }
 });
