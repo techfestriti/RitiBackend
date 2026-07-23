@@ -31,20 +31,35 @@ if (!fs.existsSync(uploadsDir)) {
 
 // Enhanced CORS Configuration
 // Extra allowed origins can be added without a code change via the
-// FRONTEND_URL env var (comma-separated if you have more than one,
-// e.g. a Netlify preview URL + your production URL).
+// FRONTEND_URL env var (comma-separated if you have more than one).
 const extraOrigins = (process.env.FRONTEND_URL || '')
   .split(',')
   .map(o => o.trim())
   .filter(Boolean);
 
+const staticAllowedOrigins = [
+  'https://golden-frangollo-580ffa.netlify.app',
+  'http://localhost:5173',
+  'http://localhost:3000', // For local development
+  ...extraOrigins
+];
+
+// Netlify gives every deploy preview / branch deploy its own subdomain,
+// e.g. https://<deploy-id>--golden-frangollo-580ffa.netlify.app
+// This regex allows any of those for the same site, not just production.
+const netlifyPreviewPattern = /^https:\/\/[a-z0-9-]+--golden-frangollo-580ffa\.netlify\.app$/;
+
 app.use(cors({
-  origin: [
-    'https://golden-frangollo-580ffa.netlify.app',
-    'http://localhost:5173',
-    'http://localhost:3000', // For local development
-    ...extraOrigins
-  ],
+  origin: (origin, callback) => {
+    // Allow non-browser requests (no origin header, e.g. curl/health checks)
+    if (!origin) return callback(null, true);
+
+    if (staticAllowedOrigins.includes(origin) || netlifyPreviewPattern.test(origin)) {
+      return callback(null, true);
+    }
+
+    callback(new Error('Not allowed by CORS'));
+  },
   methods: ['GET', 'POST', 'PUT', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'admin-auth'],
   credentials: true
