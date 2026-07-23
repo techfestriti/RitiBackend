@@ -1,5 +1,7 @@
 
 
+
+
 require('dotenv').config();
 const express = require('express');
 const mongoose = require('mongoose');
@@ -7,12 +9,19 @@ const cors = require('cors');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 
 const app = express();
 
 // Verify MongoDB URI is set
 if (!process.env.MONGODB_URI) {
   console.error('❌ FATAL ERROR: MONGODB_URI not configured in environment variables');
+  process.exit(1);
+}
+
+// Verify Admin credentials are set
+if (!process.env.ADMIN_USERNAME || !process.env.ADMIN_PASSWORD) {
+  console.error('❌ FATAL ERROR: ADMIN_USERNAME / ADMIN_PASSWORD not configured in environment variables');
   process.exit(1);
 }
 
@@ -23,11 +32,20 @@ if (!fs.existsSync(uploadsDir)) {
 }
 
 // Enhanced CORS Configuration
+// Extra allowed origins can be added without a code change via the
+// FRONTEND_URL env var (comma-separated if you have more than one,
+// e.g. a Netlify preview URL + your production URL).
+const extraOrigins = (process.env.FRONTEND_URL || '')
+  .split(',')
+  .map(o => o.trim())
+  .filter(Boolean);
+
 app.use(cors({
   origin: [
     'https://golden-frangollo-580ffa.netlify.app',
     'http://localhost:5173',
-    'http://localhost:3000' // For local development
+    'http://localhost:3000', // For local development
+    ...extraOrigins
   ],
   methods: ['GET', 'POST', 'PUT', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'admin-auth'],
@@ -119,13 +137,49 @@ const registrationSchema = new mongoose.Schema({
 
 const Registration = mongoose.model('Registration', registrationSchema);
 
-// Enhanced Authentication Middleware
+// --- Admin Auth: real login with token-based sessions ---
+// In-memory store of valid admin session tokens -> expiry timestamp.
+// (Fine for a single-instance small event app. Tokens reset on server
+// restart, and this won't work if you ever scale to multiple server
+// instances — swap for Redis/JWT if that becomes a need.)
+const adminSessions = new Map();
+const SESSION_DURATION_MS = 12 * 60 * 60 * 1000; // 12 hours
+
+function cleanExpiredSessions() {
+  const now = Date.now();
+  for (const [token, expiry] of adminSessions) {
+    if (expiry < now) adminSessions.delete(token);
+  }
+}
+
+app.post('/api/admin/login', (req, res) => {
+  const { username, password } = req.body || {};
+
+  if (username === process.env.ADMIN_USERNAME && password === process.env.ADMIN_PASSWORD) {
+    cleanExpiredSessions();
+    const token = crypto.randomBytes(32).toString('hex');
+    adminSessions.set(token, Date.now() + SESSION_DURATION_MS);
+    return res.json({ success: true, token });
+  }
+
+  res.status(401).json({ error: 'Invalid username or password' });
+});
+
+app.post('/api/admin/logout', (req, res) => {
+  const token = req.headers['admin-auth'];
+  adminSessions.delete(token);
+  res.json({ success: true });
+});
+
 const checkAdminAuth = (req, res, next) => {
-  const authHeader = req.headers['admin-auth'];
-  if (authHeader === 'true') {
+  const token = req.headers['admin-auth'];
+  const expiry = adminSessions.get(token);
+
+  if (token && expiry && expiry > Date.now()) {
     next();
   } else {
-    res.status(401).json({ error: 'Unauthorized: Invalid admin token' });
+    if (token) adminSessions.delete(token); // clean up expired token
+    res.status(401).json({ error: 'Unauthorized: Please log in again' });
   }
 };
 
@@ -154,7 +208,28 @@ app.post('/api/register', upload.single('idPhoto'), async (req, res) => {
       registrationId: newReg._id
     });
   } catch (error) {
-    // ... (keep existing error handling)
+    console.error('Registration Error:', error);
+
+    // Clean up the uploaded file if saving the registration failed,
+    // so we don't leave orphaned images on disk.
+    if (req.file?.path) {
+      fs.unlink(req.file.path, () => {});
+    }
+
+    if (error.code === 11000) {
+      return res.status(409).json({ error: 'An account with this email has already registered.' });
+    }
+
+    if (error.name === 'ValidationError') {
+      const message = Object.values(error.errors).map(e => e.message).join(', ');
+      return res.status(400).json({ error: message });
+    }
+
+    if (error instanceof multer.MulterError) {
+      return res.status(400).json({ error: error.message });
+    }
+
+    res.status(500).json({ error: 'Registration failed. Please try again.' });
   }
 });
 
@@ -222,6 +297,9 @@ app.get('/api/health', (req, res) => {
 // Error Handling
 app.use((err, req, res, next) => {
   console.error('Server Error:', err);
+  if (err instanceof multer.MulterError || /image/i.test(err.message || '')) {
+    return res.status(400).json({ error: err.message });
+  }
   res.status(500).json({ error: 'Internal server error' });
 });
 
