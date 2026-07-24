@@ -8,8 +8,27 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
+const dns = require('dns').promises;
 
 const app = express();
+
+// Checks that an email's domain actually has mail servers configured,
+// catching fake/typo domains (e.g. "gamis.com") at registration time.
+// Note: this confirms the domain can receive mail — it does NOT confirm
+// the specific mailbox exists. That would need a real verification
+// email/OTP flow, which is a bigger feature if you want it later.
+async function hasValidMxRecord(email) {
+  const domain = email?.split('@')[1];
+  if (!domain) return false;
+  try {
+    const records = await dns.resolveMx(domain);
+    // A "null MX" record (empty exchange, e.g. RFC 7505) means the domain
+    // explicitly does NOT accept mail — don't count that as valid.
+    return records.some(r => r.exchange && r.exchange !== '.');
+  } catch {
+    return false;
+  }
+}
 
 // Verify MongoDB URI is set
 if (!process.env.MONGODB_URI) {
@@ -205,6 +224,14 @@ app.post('/api/register', upload.single('idPhoto'), async (req, res) => {
       } catch {
         selectedEvents = [selectedEvents];
       }
+    }
+
+    const emailIsValid = await hasValidMxRecord(req.body.email);
+    if (!emailIsValid) {
+      if (req.file?.path) fs.unlink(req.file.path, () => {});
+      return res.status(400).json({
+        error: 'This email address doesn\'t look valid — please double check the domain (e.g. "@gmail.com") and try again.'
+      });
     }
 
     const newReg = new Registration({
