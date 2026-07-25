@@ -1,5 +1,3 @@
-
-
 require('dotenv').config();
 const express = require('express');
 const compression = require('compression');
@@ -206,12 +204,15 @@ const registrationSchema = new mongoose.Schema({
       }
     }]
   }],
-  isPresent: { type: Boolean, default: false },
-  paymentMethod: { 
-    type: String, 
-    enum: ['cash', 'online', null],
-    default: null 
-  },
+  eventStatus: [{
+    eventName: { type: String, required: true },
+    isPresent: { type: Boolean, default: false },
+    paymentMethod: {
+      type: String,
+      enum: ['cash', 'online', null],
+      default: null
+    }
+  }],
   registrationDate: { type: Date, default: Date.now }
 });
 
@@ -319,7 +320,7 @@ app.post('/api/register', upload.single('idPhoto'), async (req, res) => {
       if (hasIncompleteMember) {
         if (req.file?.path) fs.unlink(req.file.path, () => {});
         return res.status(400).json({
-          error: `Please provide a valid name, email, and 10-digit contact number for every teammate in "${eventName}".`
+          error: `Please provide a valid name, email, and 10-digit contact number (starting with 6, 7, 8, or 9) for every teammate in "${eventName}".`
         });
       }
     }
@@ -334,6 +335,7 @@ app.post('/api/register', upload.single('idPhoto'), async (req, res) => {
       ...req.body,
       selectedEvents,
       groupTeams: validGroupTeams,
+      eventStatus: selectedEvents.map(eventName => ({ eventName, isPresent: false, paymentMethod: null })),
       idPhotoPath: req.file?.path
     });
 
@@ -379,22 +381,48 @@ app.get('/api/admin/registrations', checkAdminAuth, async (req, res) => {
   }
 });
 
-// REPLACE THIS IN YOUR SERVER.JS
-app.put('/api/admin/attendance/:id', checkAdminAuth, async (req, res) => {
+// Per-event view — returns only students registered for one specific event.
+// Useful for handing an event coordinator a direct link, without needing a separate login.
+app.get('/api/admin/registrations/event/:eventName', checkAdminAuth, async (req, res) => {
   try {
-    // This supports both a JSON body { isPresent: true } AND a fallback true assessment
+    const eventName = decodeURIComponent(req.params.eventName);
+    const registrations = await Registration.find({ selectedEvents: eventName }).sort({ registrationDate: -1 });
+    res.json(registrations);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch registrations for this event' });
+  }
+});
+
+// --- Public (no login) per-event coordinator routes ---
+// Intentionally NOT behind checkAdminAuth, per explicit request: a
+// coordinator just needs the URL, no password. The eventName always comes
+// from the URL itself (not the request body), so a link for one event
+// can only ever touch that event's data, not any other event's.
+app.get('/api/event/:eventName/registrations', async (req, res) => {
+  try {
+    const eventName = decodeURIComponent(req.params.eventName);
+    const registrations = await Registration.find({ selectedEvents: eventName }).sort({ registrationDate: -1 });
+    res.json(registrations);
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch registrations for this event' });
+  }
+});
+
+app.put('/api/event/:eventName/attendance/:id', async (req, res) => {
+  try {
+    const eventName = decodeURIComponent(req.params.eventName);
     const isPresent = req.body.isPresent !== undefined ? req.body.isPresent : true;
 
-    const updated = await Registration.findByIdAndUpdate(
-      req.params.id,
-      { isPresent: isPresent },
+    const updated = await Registration.findOneAndUpdate(
+      { _id: req.params.id, 'eventStatus.eventName': eventName },
+      { $set: { 'eventStatus.$.isPresent': isPresent } },
       { new: true }
     );
-    
+
     if (!updated) {
-      return res.status(404).json({ error: 'Participant not found' });
+      return res.status(404).json({ error: 'Participant or event entry not found' });
     }
-    
+
     res.json(updated);
   } catch (error) {
     console.error('Attendance Update Error:', error);
@@ -402,19 +430,76 @@ app.put('/api/admin/attendance/:id', checkAdminAuth, async (req, res) => {
   }
 });
 
-// NEW: Payment Status Endpoint
-app.put('/api/admin/payment/:id', checkAdminAuth, async (req, res) => {
+app.put('/api/event/:eventName/payment/:id', async (req, res) => {
   try {
+    const eventName = decodeURIComponent(req.params.eventName);
     const { paymentMethod } = req.body;
     if (!['cash', 'online', null].includes(paymentMethod)) {
       return res.status(400).json({ error: 'Invalid payment method' });
     }
 
-    const updated = await Registration.findByIdAndUpdate(
-      req.params.id,
-      { paymentMethod },
+    const updated = await Registration.findOneAndUpdate(
+      { _id: req.params.id, 'eventStatus.eventName': eventName },
+      { $set: { 'eventStatus.$.paymentMethod': paymentMethod } },
       { new: true }
     );
+
+    if (!updated) {
+      return res.status(404).json({ error: 'Participant or event entry not found' });
+    }
+
+    res.json(updated);
+  } catch (error) {
+    res.status(500).json({ error: 'Payment update failed' });
+  }
+});
+
+app.put('/api/admin/attendance/:id', checkAdminAuth, async (req, res) => {
+  try {
+    const { eventName } = req.body;
+    const isPresent = req.body.isPresent !== undefined ? req.body.isPresent : true;
+
+    if (!eventName) {
+      return res.status(400).json({ error: 'eventName is required' });
+    }
+
+    const updated = await Registration.findOneAndUpdate(
+      { _id: req.params.id, 'eventStatus.eventName': eventName },
+      { $set: { 'eventStatus.$.isPresent': isPresent } },
+      { new: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ error: 'Participant or event entry not found' });
+    }
+
+    res.json(updated);
+  } catch (error) {
+    console.error('Attendance Update Error:', error);
+    res.status(500).json({ error: 'Attendance update failed' });
+  }
+});
+
+app.put('/api/admin/payment/:id', checkAdminAuth, async (req, res) => {
+  try {
+    const { eventName, paymentMethod } = req.body;
+    if (!eventName) {
+      return res.status(400).json({ error: 'eventName is required' });
+    }
+    if (!['cash', 'online', null].includes(paymentMethod)) {
+      return res.status(400).json({ error: 'Invalid payment method' });
+    }
+
+    const updated = await Registration.findOneAndUpdate(
+      { _id: req.params.id, 'eventStatus.eventName': eventName },
+      { $set: { 'eventStatus.$.paymentMethod': paymentMethod } },
+      { new: true }
+    );
+
+    if (!updated) {
+      return res.status(404).json({ error: 'Participant or event entry not found' });
+    }
+
     res.json(updated);
   } catch (error) {
     res.status(500).json({ error: 'Payment update failed' });
