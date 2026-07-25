@@ -26,7 +26,7 @@ const EVENT_CONFIG = {
   'VISION CRAFT - Prompt to Website': { type: 'group', minTeammates: 1, maxTeammates: 1 },
   'CYPHRA - Debugging': { type: 'individual' },
   'VESTIGE ALIBI - Crime Investigation': { type: 'group', minTeammates: 1, maxTeammates: 1 },
-  'SYNTH & STEEL - Idea Presentation': { type: 'group', minTeammates: 1, maxTeammates: 2 },
+  'SYNTH & STEEL - Idea Presentation': { type: 'group', minTeammates: 0, maxTeammates: 2 },
   'THE OBSIDIAN TRAIL - Treasure Hunt': { type: 'group', minTeammates: 2, maxTeammates: 2 },
   'MEMORA - Meme Creation': { type: 'individual' }
 };
