@@ -187,6 +187,15 @@ const registrationSchema = new mongoose.Schema({
     eventName: { type: String, required: true },
     members: [{
       name: { type: String, required: true, trim: true },
+      email: {
+        type: String,
+        required: true,
+        trim: true,
+        validate: {
+          validator: v => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v),
+          message: props => `${props.value} is not a valid email!`
+        }
+      },
       contact: {
         type: String,
         required: true,
@@ -301,13 +310,16 @@ app.post('/api/register', upload.single('idPhoto'), async (req, res) => {
         });
       }
 
+      const teamEmailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
       const hasIncompleteMember = members.some(
-        m => !m.name?.trim() || !/^[6-9]\d{9}$/.test(m.contact?.trim() || '')
+        m => !m.name?.trim()
+          || !/^[6-9]\d{9}$/.test(m.contact?.trim() || '')
+          || !teamEmailRegex.test(m.email?.trim() || '')
       );
       if (hasIncompleteMember) {
         if (req.file?.path) fs.unlink(req.file.path, () => {});
         return res.status(400).json({
-          error: `Please provide a valid name and 10-digit contact number for every teammate in "${eventName}".`
+          error: `Please provide a valid name, email, and 10-digit contact number for every teammate in "${eventName}".`
         });
       }
     }
