@@ -2,6 +2,7 @@
 
 require('dotenv').config();
 const express = require('express');
+const compression = require('compression');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const multer = require('multer');
@@ -17,15 +18,37 @@ const app = express();
 // Note: this confirms the domain can receive mail — it does NOT confirm
 // the specific mailbox exists. That would need a real verification
 // email/OTP flow, which is a bigger feature if you want it later.
+// Mirrors the event list in RegistrationForm.jsx. Used to validate group
+// team sizes server-side too, since client-side validation alone can be
+// bypassed by anyone calling the API directly.
+const EVENT_CONFIG = {
+  'PROMPT ARENA - Prompt Engineering': { type: 'individual' },
+  'VISION CRAFT - Prompt to Website': { type: 'group', minTeammates: 1, maxTeammates: 1 },
+  'CYPHRA - Debugging': { type: 'individual' },
+  'VESTIGE ALIBI - Crime Investigation': { type: 'group', minTeammates: 1, maxTeammates: 1 },
+  'SYNTH & STEEL - Idea Presentation': { type: 'group', minTeammates: 1, maxTeammates: 2 },
+  'THE OBSIDIAN TRAIL - Treasure Hunt': { type: 'group', minTeammates: 2, maxTeammates: 2 },
+  'MEMORA - Meme Creation': { type: 'individual' }
+};
+
 async function hasValidMxRecord(email) {
   const domain = email?.split('@')[1];
   if (!domain) return false;
   try {
-    const records = await dns.resolveMx(domain);
+    const records = await Promise.race([
+      dns.resolveMx(domain),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('DNS timeout')), 3000))
+    ]);
     // A "null MX" record (empty exchange, e.g. RFC 7505) means the domain
     // explicitly does NOT accept mail — don't count that as valid.
     return records.some(r => r.exchange && r.exchange !== '.');
-  } catch {
+  } catch (err) {
+    // If DNS itself timed out/errored (vs. a real "no such domain" answer),
+    // fail open rather than blocking a real registration during a slow moment.
+    if (err.message === 'DNS timeout') {
+      console.warn(`MX lookup timed out for domain "${domain}" — allowing registration through`);
+      return true;
+    }
     return false;
   }
 }
@@ -85,6 +108,7 @@ app.use(cors({
 }));
 
 // Middlewares
+app.use(compression());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use('/uploads', express.static(uploadsDir));
@@ -116,6 +140,8 @@ const connectDB = async () => {
       useNewUrlParser: true,
       useUnifiedTopology: true,
       serverSelectionTimeoutMS: 5000,
+      socketTimeoutMS: 20000,
+      maxPoolSize: 50,
       retryWrites: true,
       w: 'majority'
     });
@@ -157,6 +183,20 @@ const registrationSchema = new mongoose.Schema({
     }
   },
   idPhotoPath: String,
+  groupTeams: [{
+    eventName: { type: String, required: true },
+    members: [{
+      name: { type: String, required: true, trim: true },
+      contact: {
+        type: String,
+        required: true,
+        validate: {
+          validator: v => /^[6-9]\d{9}$/.test(v),
+          message: props => `${props.value} is not a valid Indian number!`
+        }
+      }
+    }]
+  }],
   isPresent: { type: Boolean, default: false },
   paymentMethod: { 
     type: String, 
@@ -234,9 +274,54 @@ app.post('/api/register', upload.single('idPhoto'), async (req, res) => {
       });
     }
 
+    let groupTeams = [];
+    if (req.body.groupTeams) {
+      try {
+        groupTeams = JSON.parse(req.body.groupTeams);
+      } catch {
+        if (req.file?.path) fs.unlink(req.file.path, () => {});
+        return res.status(400).json({ error: 'Invalid team data submitted.' });
+      }
+    }
+
+    for (const eventName of selectedEvents) {
+      const config = EVENT_CONFIG[eventName];
+      if (!config || config.type !== 'group') continue;
+
+      const team = groupTeams.find(t => t.eventName === eventName);
+      const members = team?.members || [];
+      const sizeLabel = config.minTeammates === config.maxTeammates
+        ? `${config.minTeammates}`
+        : `${config.minTeammates}-${config.maxTeammates}`;
+
+      if (members.length < config.minTeammates || members.length > config.maxTeammates) {
+        if (req.file?.path) fs.unlink(req.file.path, () => {});
+        return res.status(400).json({
+          error: `"${eventName}" requires ${sizeLabel} teammate(s) besides yourself.`
+        });
+      }
+
+      const hasIncompleteMember = members.some(
+        m => !m.name?.trim() || !/^[6-9]\d{9}$/.test(m.contact?.trim() || '')
+      );
+      if (hasIncompleteMember) {
+        if (req.file?.path) fs.unlink(req.file.path, () => {});
+        return res.status(400).json({
+          error: `Please provide a valid name and 10-digit contact number for every teammate in "${eventName}".`
+        });
+      }
+    }
+
+    // Only keep team data for events that are actually marked as group events,
+    // so stray/spoofed entries for individual events are ignored.
+    const validGroupTeams = groupTeams.filter(
+      t => EVENT_CONFIG[t.eventName]?.type === 'group' && selectedEvents.includes(t.eventName)
+    );
+
     const newReg = new Registration({
       ...req.body,
       selectedEvents,
+      groupTeams: validGroupTeams,
       idPhotoPath: req.file?.path
     });
 
