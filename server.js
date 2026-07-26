@@ -11,11 +11,6 @@ const dns = require('dns').promises;
 
 const app = express();
 
-// Checks that an email's domain actually has mail servers configured,
-// catching fake/typo domains (e.g. "gamis.com") at registration time.
-// Note: this confirms the domain can receive mail — it does NOT confirm
-// the specific mailbox exists. That would need a real verification
-// email/OTP flow, which is a bigger feature if you want it later.
 // Mirrors the event list in RegistrationForm.jsx. Used to validate group
 // team sizes server-side too, since client-side validation alone can be
 // bypassed by anyone calling the API directly.
@@ -29,9 +24,22 @@ const EVENT_CONFIG = {
   'MEMORA - Meme Creation': { type: 'individual' }
 };
 
+// Cache MX lookup results per domain so gmail.com/yahoo.com/etc. don't get
+// re-looked-up on every single registration — this is the main latency win,
+// since most students will share a handful of common email providers.
+const mxCache = new Map(); // domain -> { result: boolean, expiry: number }
+const MX_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
 async function hasValidMxRecord(email) {
   const domain = email?.split('@')[1];
   if (!domain) return false;
+
+  const cached = mxCache.get(domain);
+  if (cached && cached.expiry > Date.now()) {
+    return cached.result;
+  }
+
+  let result;
   try {
     const records = await Promise.race([
       dns.resolveMx(domain),
@@ -39,16 +47,20 @@ async function hasValidMxRecord(email) {
     ]);
     // A "null MX" record (empty exchange, e.g. RFC 7505) means the domain
     // explicitly does NOT accept mail — don't count that as valid.
-    return records.some(r => r.exchange && r.exchange !== '.');
+    result = records.some(r => r.exchange && r.exchange !== '.');
   } catch (err) {
     // If DNS itself timed out/errored (vs. a real "no such domain" answer),
     // fail open rather than blocking a real registration during a slow moment.
     if (err.message === 'DNS timeout') {
       console.warn(`MX lookup timed out for domain "${domain}" — allowing registration through`);
-      return true;
+      result = true;
+    } else {
+      result = false;
     }
-    return false;
   }
+
+  mxCache.set(domain, { result, expiry: Date.now() + MX_CACHE_TTL_MS });
+  return result;
 }
 
 // Verify MongoDB URI is set
@@ -219,10 +231,6 @@ const registrationSchema = new mongoose.Schema({
 const Registration = mongoose.model('Registration', registrationSchema);
 
 // --- Admin Auth: real login with token-based sessions ---
-// In-memory store of valid admin session tokens -> expiry timestamp.
-// (Fine for a single-instance small event app. Tokens reset on server
-// restart, and this won't work if you ever scale to multiple server
-// instances — swap for Redis/JWT if that becomes a need.)
 const adminSessions = new Map();
 const SESSION_DURATION_MS = 12 * 60 * 60 * 1000; // 12 hours
 
@@ -259,12 +267,12 @@ const checkAdminAuth = (req, res, next) => {
   if (token && expiry && expiry > Date.now()) {
     next();
   } else {
-    if (token) adminSessions.delete(token); // clean up expired token
+    if (token) adminSessions.delete(token);
     res.status(401).json({ error: 'Unauthorized: Please log in again' });
   }
 };
 
-// Registration Endpoint (unchanged)
+// Registration Endpoint
 app.post('/api/register', upload.single('idPhoto'), async (req, res) => {
   try {
     let selectedEvents = req.body.selectedEvents;
@@ -325,8 +333,6 @@ app.post('/api/register', upload.single('idPhoto'), async (req, res) => {
       }
     }
 
-    // Only keep team data for events that are actually marked as group events,
-    // so stray/spoofed entries for individual events are ignored.
     const validGroupTeams = groupTeams.filter(
       t => EVENT_CONFIG[t.eventName]?.type === 'group' && selectedEvents.includes(t.eventName)
     );
@@ -348,8 +354,6 @@ app.post('/api/register', upload.single('idPhoto'), async (req, res) => {
   } catch (error) {
     console.error('Registration Error:', error);
 
-    // Clean up the uploaded file if saving the registration failed,
-    // so we don't leave orphaned images on disk.
     if (req.file?.path) {
       fs.unlink(req.file.path, () => {});
     }
@@ -374,19 +378,17 @@ app.post('/api/register', upload.single('idPhoto'), async (req, res) => {
 // Admin Routes
 app.get('/api/admin/registrations', checkAdminAuth, async (req, res) => {
   try {
-    const registrations = await Registration.find().sort({ registrationDate: -1 });
+    const registrations = await Registration.find().sort({ registrationDate: -1 }).lean();
     res.json(registrations);
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch registrations' });
   }
 });
 
-// Per-event view — returns only students registered for one specific event.
-// Useful for handing an event coordinator a direct link, without needing a separate login.
 app.get('/api/admin/registrations/event/:eventName', checkAdminAuth, async (req, res) => {
   try {
     const eventName = decodeURIComponent(req.params.eventName);
-    const registrations = await Registration.find({ selectedEvents: eventName }).sort({ registrationDate: -1 });
+    const registrations = await Registration.find({ selectedEvents: eventName }).sort({ registrationDate: -1 }).lean();
     res.json(registrations);
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch registrations for this event' });
@@ -394,14 +396,10 @@ app.get('/api/admin/registrations/event/:eventName', checkAdminAuth, async (req,
 });
 
 // --- Public (no login) per-event coordinator routes ---
-// Intentionally NOT behind checkAdminAuth, per explicit request: a
-// coordinator just needs the URL, no password. The eventName always comes
-// from the URL itself (not the request body), so a link for one event
-// can only ever touch that event's data, not any other event's.
 app.get('/api/event/:eventName/registrations', async (req, res) => {
   try {
     const eventName = decodeURIComponent(req.params.eventName);
-    const registrations = await Registration.find({ selectedEvents: eventName }).sort({ registrationDate: -1 });
+    const registrations = await Registration.find({ selectedEvents: eventName }).sort({ registrationDate: -1 }).lean();
     res.json(registrations);
   } catch (error) {
     res.status(500).json({ error: 'Failed to fetch registrations for this event' });
