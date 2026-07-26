@@ -82,8 +82,6 @@ if (!fs.existsSync(uploadsDir)) {
 }
 
 // Enhanced CORS Configuration
-// Extra allowed origins can be added without a code change via the
-// FRONTEND_URL env var (comma-separated if you have more than one).
 const extraOrigins = (process.env.FRONTEND_URL || '')
   .split(',')
   .map(o => o.trim())
@@ -92,18 +90,14 @@ const extraOrigins = (process.env.FRONTEND_URL || '')
 const staticAllowedOrigins = [
   'https://golden-frangollo-580ffa.netlify.app',
   'http://localhost:5173',
-  'http://localhost:3000', // For local development
+  'http://localhost:3000',
   ...extraOrigins
 ];
 
-// Netlify gives every deploy preview / branch deploy its own subdomain,
-// e.g. https://<deploy-id>--golden-frangollo-580ffa.netlify.app
-// This regex allows any of those for the same site, not just production.
 const netlifyPreviewPattern = /^https:\/\/[a-z0-9-]+--golden-frangollo-580ffa\.netlify\.app$/;
 
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow non-browser requests (no origin header, e.g. curl/health checks)
     if (!origin) return callback(null, true);
 
     if (staticAllowedOrigins.includes(origin) || netlifyPreviewPattern.test(origin)) {
@@ -123,7 +117,7 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use('/uploads', express.static(uploadsDir));
 
-// Multer Configuration (unchanged)
+// Multer Configuration
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, 'uploads/'),
   filename: (req, file, cb) => {
@@ -162,7 +156,7 @@ const connectDB = async () => {
   }
 };
 
-// Updated Mongoose Schema with Payment Tracking
+// Mongoose Schema
 const registrationSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   email: { 
@@ -411,11 +405,21 @@ app.put('/api/event/:eventName/attendance/:id', async (req, res) => {
     const eventName = decodeURIComponent(req.params.eventName);
     const isPresent = req.body.isPresent !== undefined ? req.body.isPresent : true;
 
-    const updated = await Registration.findOneAndUpdate(
+    let updated = await Registration.findOneAndUpdate(
       { _id: req.params.id, 'eventStatus.eventName': eventName },
       { $set: { 'eventStatus.$.isPresent': isPresent } },
       { new: true }
     );
+
+    // Self-heal: older registrations created before the eventStatus field
+    // existed won't have an entry to match above. Add one instead of failing.
+    if (!updated) {
+      updated = await Registration.findOneAndUpdate(
+        { _id: req.params.id, selectedEvents: eventName, 'eventStatus.eventName': { $ne: eventName } },
+        { $push: { eventStatus: { eventName, isPresent, paymentMethod: null } } },
+        { new: true }
+      );
+    }
 
     if (!updated) {
       return res.status(404).json({ error: 'Participant or event entry not found' });
@@ -436,11 +440,19 @@ app.put('/api/event/:eventName/payment/:id', async (req, res) => {
       return res.status(400).json({ error: 'Invalid payment method' });
     }
 
-    const updated = await Registration.findOneAndUpdate(
+    let updated = await Registration.findOneAndUpdate(
       { _id: req.params.id, 'eventStatus.eventName': eventName },
       { $set: { 'eventStatus.$.paymentMethod': paymentMethod } },
       { new: true }
     );
+
+    if (!updated) {
+      updated = await Registration.findOneAndUpdate(
+        { _id: req.params.id, selectedEvents: eventName, 'eventStatus.eventName': { $ne: eventName } },
+        { $push: { eventStatus: { eventName, isPresent: false, paymentMethod } } },
+        { new: true }
+      );
+    }
 
     if (!updated) {
       return res.status(404).json({ error: 'Participant or event entry not found' });
@@ -461,11 +473,19 @@ app.put('/api/admin/attendance/:id', checkAdminAuth, async (req, res) => {
       return res.status(400).json({ error: 'eventName is required' });
     }
 
-    const updated = await Registration.findOneAndUpdate(
+    let updated = await Registration.findOneAndUpdate(
       { _id: req.params.id, 'eventStatus.eventName': eventName },
       { $set: { 'eventStatus.$.isPresent': isPresent } },
       { new: true }
     );
+
+    if (!updated) {
+      updated = await Registration.findOneAndUpdate(
+        { _id: req.params.id, selectedEvents: eventName, 'eventStatus.eventName': { $ne: eventName } },
+        { $push: { eventStatus: { eventName, isPresent, paymentMethod: null } } },
+        { new: true }
+      );
+    }
 
     if (!updated) {
       return res.status(404).json({ error: 'Participant or event entry not found' });
@@ -488,11 +508,19 @@ app.put('/api/admin/payment/:id', checkAdminAuth, async (req, res) => {
       return res.status(400).json({ error: 'Invalid payment method' });
     }
 
-    const updated = await Registration.findOneAndUpdate(
+    let updated = await Registration.findOneAndUpdate(
       { _id: req.params.id, 'eventStatus.eventName': eventName },
       { $set: { 'eventStatus.$.paymentMethod': paymentMethod } },
       { new: true }
     );
+
+    if (!updated) {
+      updated = await Registration.findOneAndUpdate(
+        { _id: req.params.id, selectedEvents: eventName, 'eventStatus.eventName': { $ne: eventName } },
+        { $push: { eventStatus: { eventName, isPresent: false, paymentMethod } } },
+        { new: true }
+      );
+    }
 
     if (!updated) {
       return res.status(404).json({ error: 'Participant or event entry not found' });
