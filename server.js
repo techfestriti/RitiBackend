@@ -207,7 +207,8 @@ const registrationSchema = new mongoose.Schema({
           validator: v => /^[6-9]\d{9}$/.test(v),
           message: props => `${props.value} is not a valid Indian number!`
         }
-      }
+      },
+      college: { type: String, required: true, trim: true }
     }]
   }],
   eventStatus: [{
@@ -318,11 +319,12 @@ app.post('/api/register', upload.single('idPhoto'), async (req, res) => {
         m => !m.name?.trim()
           || !/^[6-9]\d{9}$/.test(m.contact?.trim() || '')
           || !teamEmailRegex.test(m.email?.trim() || '')
+          || !m.college?.trim()
       );
       if (hasIncompleteMember) {
         if (req.file?.path) fs.unlink(req.file.path, () => {});
         return res.status(400).json({
-          error: `Please provide a valid name, email, and 10-digit contact number (starting with 6, 7, 8, or 9) for every teammate in "${eventName}".`
+          error: `Please provide a valid name, email, 10-digit contact number (starting with 6, 7, 8, or 9), and college name for every teammate in "${eventName}".`
         });
       }
     }
