@@ -11,9 +11,6 @@ const dns = require('dns').promises;
 
 const app = express();
 
-// Mirrors the event list in RegistrationForm.jsx. Used to validate group
-// team sizes server-side too, since client-side validation alone can be
-// bypassed by anyone calling the API directly.
 const EVENT_CONFIG = {
   'PROMPT ARENA - Prompt Engineering': { type: 'individual' },
   'VISION CRAFT - Prompt to Website': { type: 'group', minTeammates: 1, maxTeammates: 1 },
@@ -24,11 +21,8 @@ const EVENT_CONFIG = {
   'MEMORA - Meme Creation': { type: 'individual' }
 };
 
-// Cache MX lookup results per domain so gmail.com/yahoo.com/etc. don't get
-// re-looked-up on every single registration — this is the main latency win,
-// since most students will share a handful of common email providers.
-const mxCache = new Map(); // domain -> { result: boolean, expiry: number }
-const MX_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const mxCache = new Map();
+const MX_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 async function hasValidMxRecord(email) {
   const domain = email?.split('@')[1];
@@ -45,12 +39,8 @@ async function hasValidMxRecord(email) {
       dns.resolveMx(domain),
       new Promise((_, reject) => setTimeout(() => reject(new Error('DNS timeout')), 3000))
     ]);
-    // A "null MX" record (empty exchange, e.g. RFC 7505) means the domain
-    // explicitly does NOT accept mail — don't count that as valid.
     result = records.some(r => r.exchange && r.exchange !== '.');
   } catch (err) {
-    // If DNS itself timed out/errored (vs. a real "no such domain" answer),
-    // fail open rather than blocking a real registration during a slow moment.
     if (err.message === 'DNS timeout') {
       console.warn(`MX lookup timed out for domain "${domain}" — allowing registration through`);
       result = true;
@@ -63,25 +53,21 @@ async function hasValidMxRecord(email) {
   return result;
 }
 
-// Verify MongoDB URI is set
 if (!process.env.MONGODB_URI) {
   console.error('❌ FATAL ERROR: MONGODB_URI not configured in environment variables');
   process.exit(1);
 }
 
-// Verify Admin credentials are set
 if (!process.env.ADMIN_USERNAME || !process.env.ADMIN_PASSWORD) {
   console.error('❌ FATAL ERROR: ADMIN_USERNAME / ADMIN_PASSWORD not configured in environment variables');
   process.exit(1);
 }
 
-// Create 'uploads' directory if it doesn't exist
 const uploadsDir = path.join(__dirname, 'uploads');
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });
 }
 
-// Enhanced CORS Configuration
 const extraOrigins = (process.env.FRONTEND_URL || '')
   .split(',')
   .map(o => o.trim())
@@ -106,18 +92,16 @@ app.use(cors({
 
     callback(new Error('Not allowed by CORS'));
   },
-  methods: ['GET', 'POST', 'PUT', 'OPTIONS'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'admin-auth'],
   credentials: true
 }));
 
-// Middlewares
 app.use(compression());
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use('/uploads', express.static(uploadsDir));
 
-// Multer Configuration
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, 'uploads/'),
   filename: (req, file, cb) => {
@@ -134,10 +118,9 @@ const upload = multer({
       ? cb(null, true) 
       : cb(new Error('Only JPEG/PNG images allowed'));
   },
-  limits: { fileSize: 5 * 1024 * 1024 } // 5MB
+  limits: { fileSize: 5 * 1024 * 1024 }
 });
 
-// MongoDB Connection with retry logic
 const connectDB = async () => {
   try {
     await mongoose.connect(process.env.MONGODB_URI, {
@@ -156,12 +139,13 @@ const connectDB = async () => {
   }
 };
 
-// Mongoose Schema
 const registrationSchema = new mongoose.Schema({
   name: { type: String, required: true, trim: true },
   email: { 
     type: String, 
     required: true,
+    trim: true,
+    lowercase: true,
     validate: {
       validator: v => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v),
       message: props => `${props.value} is not a valid email!`
@@ -225,9 +209,8 @@ const registrationSchema = new mongoose.Schema({
 
 const Registration = mongoose.model('Registration', registrationSchema);
 
-// --- Admin Auth: real login with token-based sessions ---
 const adminSessions = new Map();
-const SESSION_DURATION_MS = 12 * 60 * 60 * 1000; // 12 hours
+const SESSION_DURATION_MS = 12 * 60 * 60 * 1000;
 
 function cleanExpiredSessions() {
   const now = Date.now();
@@ -276,6 +259,27 @@ app.post('/api/register', upload.single('idPhoto'), async (req, res) => {
         selectedEvents = JSON.parse(selectedEvents);
       } catch {
         selectedEvents = [selectedEvents];
+      }
+    }
+
+    const normalizedEmail = req.body.email?.trim().toLowerCase();
+
+    const existingReg = normalizedEmail
+      ? await Registration.findOne({
+          email: { $regex: new RegExp(`^${normalizedEmail.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
+        })
+      : null;
+
+    if (existingReg) {
+      const duplicateEvents = selectedEvents.filter(ev =>
+        existingReg.selectedEvents.includes(ev)
+      );
+
+      if (duplicateEvents.length > 0) {
+        if (req.file?.path) fs.unlink(req.file.path, () => {});
+        return res.status(409).json({
+          error: `You have already registered for: ${duplicateEvents.join(', ')}. Please choose different events, or contact us if this is a mistake.`
+        });
       }
     }
 
@@ -335,6 +339,7 @@ app.post('/api/register', upload.single('idPhoto'), async (req, res) => {
 
     const newReg = new Registration({
       ...req.body,
+      email: normalizedEmail,
       selectedEvents,
       groupTeams: validGroupTeams,
       eventStatus: selectedEvents.map(eventName => ({ eventName, isPresent: false, paymentMethod: null })),
@@ -391,6 +396,30 @@ app.get('/api/admin/registrations/event/:eventName', checkAdminAuth, async (req,
   }
 });
 
+// Delete a registration (admin only)
+app.delete('/api/admin/registrations/:id', checkAdminAuth, async (req, res) => {
+  try {
+    const registration = await Registration.findById(req.params.id);
+
+    if (!registration) {
+      return res.status(404).json({ error: 'Registration not found' });
+    }
+
+    if (registration.idPhotoPath && fs.existsSync(registration.idPhotoPath)) {
+      fs.unlink(registration.idPhotoPath, (err) => {
+        if (err) console.error('Failed to delete ID photo file:', err);
+      });
+    }
+
+    await Registration.findByIdAndDelete(req.params.id);
+
+    res.json({ success: true, message: 'Registration deleted successfully' });
+  } catch (error) {
+    console.error('Delete Registration Error:', error);
+    res.status(500).json({ error: 'Failed to delete registration' });
+  }
+});
+
 // --- Public (no login) per-event coordinator routes ---
 app.get('/api/event/:eventName/registrations', async (req, res) => {
   try {
@@ -413,8 +442,6 @@ app.put('/api/event/:eventName/attendance/:id', async (req, res) => {
       { new: true }
     );
 
-    // Self-heal: older registrations created before the eventStatus field
-    // existed won't have an entry to match above. Add one instead of failing.
     if (!updated) {
       updated = await Registration.findOneAndUpdate(
         { _id: req.params.id, selectedEvents: eventName, 'eventStatus.eventName': { $ne: eventName } },
